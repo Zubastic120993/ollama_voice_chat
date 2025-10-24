@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>🧠 Local Ollama Chat</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    #stopVoiceButton {
+      display: none;
+      transition: opacity 0.3s ease;
+    }
+  </style>
+</head>
+<body>
+  <h2>🧠 Local Ollama Chat</h2>
+
+  <div id="chat-container"></div>
+
+  <div id="input-container">
+    <input type="text" id="user_input" placeholder="Type your message...">
+    <button id="sendButton">Send</button>
+    <button id="micButton">🎤</button>
+    <button id="stopVoiceButton">🛑 Stop Voice</button>
+    <button id="clearButton">🧹 Clear Chat</button>
+  </div>
+
+  <script>
+    const chatContainer = document.getElementById("chat-container");
+    const sendButton = document.getElementById("sendButton");
+    const micButton = document.getElementById("micButton");
+    const stopVoiceButton = document.getElementById("stopVoiceButton");
+    const clearButton = document.getElementById("clearButton");
+
+    let mediaRecorder, audioChunks = [];
+    let currentUtterance = null;
+
+    // 📜 Append message to chat window
+    function appendMessage(role, text) {
+      const msg = document.createElement("div");
+      msg.classList.add("message", role);
+      msg.textContent = text;
+      chatContainer.appendChild(msg);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    // 💬 Send typed message
+    async function sendMessage() {
+      const input = document.getElementById("user_input");
+      const text = input.value.trim();
+      if (!text) return;
+
+      appendMessage("user", text);
+      input.value = "";
+
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+
+        const data = await res.json();
+        appendMessage("bot", data.reply);
+        speakText(data.reply);
+      } catch (err) {
+        appendMessage("bot", "⚠️ Chat request failed.");
+        console.error(err);
+      }
+    }
+
+    sendButton.onclick = sendMessage;
+    document.getElementById("user_input").addEventListener("keydown", e => {
+      if (e.key === "Enter") sendMessage();
+    });
+
+    // 🗣️ Speak text (with dynamic Stop button)
+    function speakText(text) {
+      if (speechSynthesis.speaking) speechSynthesis.cancel();
+
+      currentUtterance = new SpeechSynthesisUtterance(text);
+      currentUtterance.rate = 1;
+      currentUtterance.pitch = 1;
+
+      currentUtterance.onstart = () => stopVoiceButton.style.display = "inline-block";
+      currentUtterance.onend = () => {
+        stopVoiceButton.style.display = "none";
+        currentUtterance = null;
+      };
+
+      speechSynthesis.speak(currentUtterance);
+    }
+
+    // 🛑 Stop voice manually
+    stopVoiceButton.onclick = () => {
+      if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+        appendMessage("bot", "🔇 Voice playback stopped.");
+        stopVoiceButton.style.display = "none";
+      }
+    };
+
+    // 🔴 Interrupt with Spacebar
+    document.addEventListener("keydown", e => {
+      if (e.code === "Space" && speechSynthesis.speaking) {
+        e.preventDefault();
+        speechSynthesis.cancel();
+        appendMessage("bot", "🔇 Voice playback stopped (Spacebar).");
+        stopVoiceButton.style.display = "none";
+      }
+    });
+
+    // 🎤 Record and send voice
+    micButton.onclick = async () => {
+      if (!mediaRecorder) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+
+        mediaRecorder.onstart = () => appendMessage("bot", "🎤 Listening... please speak now");
+
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(audioChunks, { type: "audio/webm;codecs=opus" });
+          audioChunks = [];
+          const formData = new FormData();
+          formData.append("audio", blob, "voice.webm");
+
+          const lastBotMsg = chatContainer.querySelector(".bot:last-child");
+          if (lastBotMsg) lastBotMsg.textContent = "🧠 Processing voice...";
+
+          try {
+            const res = await fetch("/voice", { method: "POST", body: formData });
+            const data = await res.json();
+
+            if (lastBotMsg) {
+              lastBotMsg.textContent = data.text?.trim()
+                ? "👂 You said: " + data.text
+                : "⚠️ No speech detected.";
+            }
+
+            if (data.text?.trim()) {
+              appendMessage("user", data.text);
+              const replyRes = await fetch("/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: data.text })
+              });
+              const replyData = await replyRes.json();
+              appendMessage("bot", replyData.reply);
+              speakText(replyData.reply);
+            }
+          } catch (err) {
+            appendMessage("bot", "⚠️ Error processing voice input.");
+            console.error(err);
+          }
+        };
+      }
+
+      // Toggle recording
+      if (mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+        micButton.textContent = "🎤";
+      } else {
+        audioChunks = [];
+        mediaRecorder.start();
+        micButton.textContent = "🛑 Stop";
+      }
+    };
+
+    // 🧹 Clear chat with confirmation
+    clearButton.onclick = async () => {
+      const confirmClear = confirm("⚠️ Are you sure you want to clear the chat?");
+      if (!confirmClear) return;
+
+      chatContainer.innerHTML = "";
+      await fetch("/clear", { method: "POST" });
+      appendMessage("bot", "💬 Chat history cleared.");
+    };
+
+    // 💡 Keyboard shortcut (Ctrl/Cmd + L to clear chat)
+    document.addEventListener("keydown", e => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        clearButton.click();
+      }
+    });
+  </script>
+</body>
+</html>
