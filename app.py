@@ -7,28 +7,49 @@ from pydub.utils import which, mediainfo
 import wave
 import json
 import os
+import logging
 
 # ============================================
-# ⚙️ Local setup
+# ⚙️ Import Config and Tools
+# ============================================
+from config import (
+    OLLAMA_URL,
+    OLLAMA_MODEL,
+    VOSK_MODEL_PATH,
+    DEBUG_MODE
+)
+from tools.logic_tool import call_engineering_tool
+
+
+# ============================================
+# 🧩 App Setup
 # ============================================
 app = Flask(__name__)
 CORS(app)
 
+# Logging setup
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+# Audio setup
 AudioSegment.converter = which("ffmpeg")
 AudioSegment.ffprobe = which("ffprobe")
 
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-MODEL = "llama3"
+# LLM client (Ollama)
+client = OpenAI(base_url=OLLAMA_URL, api_key="ollama")
+MODEL = OLLAMA_MODEL
 
-# Load local Vosk model
-vosk_model = Model("models/en_full")
+# Vosk speech model
+vosk_model = Model(VOSK_MODEL_PATH)
+
 
 # ============================================
-# 💾 Memory (chat history)
+# 💾 Chat Memory
 # ============================================
 chat_history = [
-    {"role": "system", "content": "You are a helpful assistant."}
+    {"role": "system", "content": "You are a helpful engineering assistant."}
 ]
+
 
 # ============================================
 # 🧠 Routes
@@ -37,27 +58,31 @@ chat_history = [
 def index():
     return render_template("index.html")
 
+
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Handles text chat requests with persistent memory"""
+    """Handles text chat requests with persistent memory and tool calls"""
     global chat_history
-    user_message = request.json.get("message", "")
-    if not user_message.strip():
+    user_message = request.json.get("message", "").strip()
+
+    if not user_message:
         return jsonify({"reply": "⚠️ Please say or type something."})
 
-    # Add user message to history
+    # 🧠 1. Try to call the scientific/engineering tool
+    tool_reply = call_engineering_tool(user_message)
+    if tool_reply:
+        log.info("🧰 Tool used for: %s", user_message)
+        return jsonify({"reply": tool_reply})
+
+    # 🧩 2. Otherwise, use the local Ollama model
     chat_history.append({"role": "user", "content": user_message})
-
-    # Generate response from local LLM
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=chat_history
-    )
-
+    response = client.chat.completions.create(model=MODEL, messages=chat_history)
     reply = response.choices[0].message.content
     chat_history.append({"role": "assistant", "content": reply})
 
+    log.info("💬 LLM reply: %s", reply)
     return jsonify({"reply": reply})
+
 
 @app.route("/voice", methods=["POST"])
 def voice():
@@ -72,7 +97,7 @@ def voice():
 
     try:
         info = mediainfo(temp_webm)
-        print("🎤 Incoming audio info:", info)
+        log.info("🎤 Incoming audio info: %s", info)
 
         # Convert & normalize
         sound = AudioSegment.from_file(temp_webm, format="webm")
@@ -94,15 +119,14 @@ def voice():
                 result = json.loads(rec.Result())
                 text += " " + result.get("text", "")
 
-        # Final flush
         final = json.loads(rec.FinalResult()).get("text", "")
         text = (text + " " + final).strip()
         wf.close()
 
-        print("🎧 Recognized text:", text or "[none]")
+        log.info("🎧 Recognized text: %s", text or "[none]")
 
     except Exception as e:
-        print("❌ Audio processing failed:", e)
+        log.error("❌ Audio processing failed: %s", e)
         return jsonify({"error": str(e)}), 500
     finally:
         for f in (temp_webm, temp_wav):
@@ -111,18 +135,20 @@ def voice():
 
     return jsonify({"text": text})
 
+
 @app.route("/clear", methods=["POST"])
 def clear_chat():
     """Clears chat memory"""
     global chat_history
     chat_history = [
-        {"role": "system", "content": "You are a helpful assistant."}
+        {"role": "system", "content": "You are a helpful engineering assistant."}
     ]
-    print("🧹 Chat memory cleared.")
+    log.info("🧹 Chat memory cleared.")
     return jsonify({"status": "cleared"})
+
 
 # ============================================
 # 🚀 Run App
 # ============================================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=DEBUG_MODE)
